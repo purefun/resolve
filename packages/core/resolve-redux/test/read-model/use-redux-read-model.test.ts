@@ -139,7 +139,7 @@ describe('query as plain object overload', () => {
 
   test('useQueryBuilder base hook called with custom query options and dependencies', () => {
     const dependency = 'dependency'
-    renderHook(() =>
+    const hook = renderHook(() =>
       useReduxReadModel(
         makeQuery(),
         initialState,
@@ -158,6 +158,11 @@ describe('query as plain object overload', () => {
       expect.anything(),
       [dependency]
     )
+
+    const data = hook.result.current
+
+    hook.rerender()
+    expect(hook.result.current).toBe(data)
   })
 
   test('custom redux actions', () => {
@@ -355,6 +360,7 @@ describe('query as plain object overload', () => {
 
     expect(mDispatch).toHaveBeenCalledTimes(0)
   })
+
   test('the hook should dispatch initial state action on creation with selector id', async () => {
     const query = makeQuery()
 
