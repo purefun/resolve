@@ -8,6 +8,24 @@ const devConfig = {
   staticPath: 'static',
   staticDir: 'static',
   distDir: 'dist',
+  backend: {
+    api: {
+      module: 'resolve-backend-express',
+      options: {
+        port: declareRuntimeEnv('PORT', '3000'),
+      },
+    },
+    eventBroker: {
+      module: 'resolve-backend-express',
+      options: {
+        publisherAddress: 'http://127.0.0.1:3500',
+        consumerAddress: 'http://127.0.0.1:3501',
+        databaseFile: 'data/local-bus-broker.db',
+        upstream: true,
+      },
+    },
+    launchBroker: true,
+  },
   readModelConnectors: {
     default: {
       module: 'resolve-readmodel-lite',

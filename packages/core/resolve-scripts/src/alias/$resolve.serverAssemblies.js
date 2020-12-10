@@ -12,6 +12,7 @@ export default () => `
   import viewModels from '$resolve.viewModels'
   import sagas from '$resolve.sagas'
   import uploadAdapter from '$resolve.uploadAdapter'
+  import backend from '$resolve.backend'
 
   export default {
     assemblies: {
@@ -19,7 +20,8 @@ export default () => `
       eventstoreAdapter,
       readModelConnectors,
       serverImports,
-      uploadAdapter
+      uploadAdapter,
+      backend
     },
     constants,
     domain: {

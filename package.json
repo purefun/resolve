@@ -42,6 +42,7 @@
     "packages": [
       "packages/core/*",
       "packages/modules/*",
+      "packages/runtime/backend/*",
       "packages/internal/*",
       "packages/adapters/eventstore-adapters/*",
       "packages/adapters/readmodel-adapters/*",

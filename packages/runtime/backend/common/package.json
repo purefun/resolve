@@ -1,5 +1,5 @@
 {
-  "name": "resolve-runtime",
+  "name": "resolve-backend-common",
   "version": "0.26.3",
   "description": "The reSolve framework's backend server.",
   "keywords": [

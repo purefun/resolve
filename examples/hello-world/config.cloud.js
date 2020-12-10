@@ -4,6 +4,14 @@ export default {
   target: 'cloud',
   mode: 'production',
   staticPath: declareRuntimeEnv('RESOLVE_CLOUD_STATIC_URL'),
+  backend: {
+    api: {
+      module: 'resolve-backend-aws',
+      options: {
+        staticPath: declareRuntimeEnv('RESOLVE_CLOUD_STATIC_URL'),
+      },
+    },
+  },
   eventstoreAdapter: {
     module: 'resolve-eventstore-postgresql-serverless',
     options: {

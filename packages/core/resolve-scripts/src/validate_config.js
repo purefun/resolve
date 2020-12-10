@@ -156,6 +156,7 @@ const validateClientEntries = (config) => {
 }
 
 const validateConfig = (config) => {
+  // TODO: push module schema validation to each package and require it for each module recursively to validate
   const linearizedConfig = JSON.parse(JSON.stringify(config))
   const valid = ajv.validate(schemaResolveConfig, linearizedConfig)
 
