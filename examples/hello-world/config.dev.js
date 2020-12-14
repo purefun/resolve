@@ -8,6 +8,38 @@ const devConfig = {
   staticPath: 'static',
   staticDir: 'static',
   distDir: 'dist',
+  runtime: {
+    module: 'resolve-runtime-express',
+    options: {},
+    readModelConnectors: {
+      default: {
+        module: 'resolve-readmodel-lite',
+        options: {
+          databaseFile: 'data/read-models.db',
+        },
+      },
+      /*
+        default: {
+          module: 'resolve-readmodel-mysql',
+          options: {
+            host: 'localhost',
+            port: 3306,
+            user: 'customUser',
+            password: 'customPassword',
+            database: 'customDatabaseName'
+          }
+        }
+      */
+    },
+    eventstoreAdapter: {
+      module: 'resolve-eventstore-lite',
+      options: {
+        databaseFile: 'data/event-store.db',
+        secretsFile: 'data/secrets.db',
+        snapshotBucketSize: 100,
+      },
+    },
+  },
   backend: {
     api: {
       module: 'resolve-backend-express',

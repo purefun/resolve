@@ -12,14 +12,14 @@ export default () => `
           global.serverAssemblies = interopRequireDefault(
             require('$resolve.serverAssemblies')
           ).default
-          global.serverAssemblies = interopRequireDefault(
+          global.eventBrokenConfig = interopRequireDefault(
             require('$resolve.eventBrokenConfig')
           ).default
           global.entryPoint = interopRequireDefault(
             require('resolve-runtime/lib/cloud')
           ).default
 
-          global.initPromise = cloudEntry(serverAssemblies)
+          global.initPromise = global.entryPoint(serverAssemblies)
         }
         const worker = await initPromise
         return await worker(...args)
