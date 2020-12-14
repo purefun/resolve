@@ -2,6 +2,7 @@ import 'source-map-support/register'
 import { Query } from 'resolve-client'
 import debugLevels from 'resolve-debug-levels'
 import { EventStoreAdapter } from 'resolve-query/types/types'
+import { Command, Event } from 'resolve-core'
 
 const log = debugLevels('resolve:resolve-runtime:entry-point')
 
@@ -14,8 +15,24 @@ type ServerContext = {
   domain: object
 }
 type Runtime = {}
+type EventTargetContext = {
+  onBeforeBatch: Function
+  onSuccessBatch: Function
+  onFailBatch: Function
+  onBeforeEvent: Function
+  onSuccessEvent: Function
+  onFailEvent: Function
+}
+type CommandExecutor = (runtime: Runtime, command: Command) => Promise<any>
 type Resolve = {
   query: (runtime: Runtime, query: Query) => Promise<any>
+  command: CommandExecutor
+  applyEvents: (
+    runtime: Runtime,
+    target: EventTarget,
+    events: Event[],
+    context: EventTargetContext
+  ) => Promise<any>
 }
 
 const initRuntime = (context: ServerContext, resolve: Resolve): Promise<any> =>
