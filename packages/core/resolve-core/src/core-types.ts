@@ -1,5 +1,6 @@
-// Primitives
+import { SecretsManager } from './runtime'
 
+// Primitives
 export type SerializablePrimitive = string | number | boolean | null
 export type SerializableMap = {
   [key: string]: Serializable
@@ -24,12 +25,6 @@ export type Event = {
 
 export type PlainData = Serializable
 export type EncryptedBlob = string
-
-export type SecretsManager = {
-  getSecret: (id: string) => Promise<string>
-  setSecret: (id: string, secret: string) => Promise<void>
-  deleteSecret: (id: string) => Promise<void>
-}
 
 export type Encrypter = (data: PlainData) => EncryptedBlob
 export type Decrypter = (blob: EncryptedBlob) => PlainData
@@ -205,3 +200,13 @@ export type SagaEncryptionFactory = (
   event: Event,
   context: SagaEncryptionContext
 ) => Promise<Encryption | null>
+
+export type AggregateMeta = {
+  name: string
+  commands: Aggregate
+  projection: AggregateProjection
+  serializeState: Function
+  deserializeState: Function
+  encryption: AggregateEncryptionFactory | null
+  invariantHash?: string
+}

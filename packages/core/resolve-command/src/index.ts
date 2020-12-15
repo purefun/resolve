@@ -1,50 +1,17 @@
 import {
-  Aggregate,
-  AggregateEncryptionFactory,
   AggregateProjection,
   Command,
   CommandHandler,
   CommandResult,
   Event,
-  SecretsManager,
+  AggregateMeta,
+  Eventstore,
+  Monitoring,
 } from 'resolve-core'
 import getLog from './get-log'
 
-type EventstoreAdapter = {
-  getNextCursor: Function
-  saveSnapshot: Function
-  getSecretsManager: () => Promise<SecretsManager>
-  loadSnapshot: (snapshotKey: string) => Promise<string | null>
-  loadEvents: (param: {
-    aggregateIds: string[]
-    cursor: null
-    limit: number
-  }) => Promise<{
-    events: any[]
-  }>
-}
-
-type AggregateMeta = {
+type AggregateInstance = {
   name: string
-  commands: Aggregate
-  projection: AggregateProjection
-  serializeState: Function
-  deserializeState: Function
-  encryption: AggregateEncryptionFactory | null
-  invariantHash?: string
-}
-
-type CommandPool = {
-  onCommandExecuted: (event: any) => Promise<void>
-  onError: (error: Error, part: string) => Promise<void>
-  performanceTracer: any
-  aggregateName: string
-  isDisposed: boolean
-  eventstoreAdapter: EventstoreAdapter
-  aggregates: AggregateMeta[]
-}
-
-type AggregateInfo = {
   aggregateVersion: number
   aggregateId: string
   aggregateState: any
@@ -56,18 +23,36 @@ type AggregateInfo = {
   deserializeState: Function
 }
 
-export type CommandExecutor = {
-  (command: Command): Promise<CommandResult>
+export type CommandExecutor = (command: Command) => Promise<CommandResult>
+
+export type DisposableCommandExecutor = {
+  execute: (command: Command) => Promise<CommandResult>
   dispose: () => Promise<void>
 }
 
-export type CommandExecutorBuilder = (context: {
-  onCommandExecuted: (event: any) => Promise<void>
-  onError?: (error: Error, part: string) => Promise<void>
+type CommandDomain = {
   aggregates: AggregateMeta[]
-  performanceTracer?: any
-  eventstoreAdapter: EventstoreAdapter
-}) => CommandExecutor
+}
+
+type CommandRuntime = {
+  monitoring?: Monitoring
+  eventstore: Eventstore
+}
+
+type CommandExecutorState = {
+  isDisposed: boolean
+}
+
+type CommandExecutorBuilder<T> = (
+  domain: CommandDomain,
+  runtime: CommandRuntime,
+  state?: CommandExecutorState
+) => T
+
+type SnapshotProcessor = (
+  runtime: CommandRuntime,
+  aggregateInstance: AggregateInstance
+) => Promise<any>
 
 // eslint-disable-next-line no-new-func
 const CommandError = Function()
@@ -104,17 +89,16 @@ const verifyCommand = ({ aggregateId, aggregateName, type }: Command): void => {
 }
 
 const projectionEventHandler = async (
-  pool: CommandPool,
-  aggregateInfo: AggregateInfo,
-  processSnapshot: Function | null,
+  runtime: CommandRuntime,
+  state: CommandExecutorState,
+  aggregateInstance: AggregateInstance,
+  processSnapshot: SnapshotProcessor | null,
   event: Event
 ): Promise<any> => {
-  const segment = pool.performanceTracer
-    ? pool.performanceTracer.getSegment()
-    : null
-  const subSegment = segment ? segment.addNewSubsegment('applyEvent') : null
+  const segment = runtime.monitoring?.performanceTracer?.getSegment()
+  const subSegment = segment?.addNewSubsegment('applyEvent')
   try {
-    const aggregateName = pool.aggregateName
+    const aggregateName = aggregateInstance.name
 
     if (subSegment != null) {
       subSegment.addAnnotation('aggregateName', aggregateName)
@@ -122,35 +106,34 @@ const projectionEventHandler = async (
       subSegment.addAnnotation('origin', 'resolve:applyEvent')
     }
 
-    if (pool.isDisposed) {
+    if (state.isDisposed) {
       throw generateCommandError('Command handler is disposed')
     }
 
-    if (aggregateInfo.aggregateVersion >= event.aggregateVersion) {
+    if (aggregateInstance.aggregateVersion >= event.aggregateVersion) {
       throw generateCommandError(
-        `Incorrect order of events by aggregateId = "${aggregateInfo.aggregateId}"`
+        `Incorrect order of events by aggregateId = "${aggregateInstance.aggregateId}"`
       )
     }
-    aggregateInfo.aggregateVersion = event.aggregateVersion
+    aggregateInstance.aggregateVersion = event.aggregateVersion
     if (
-      aggregateInfo.projection != null &&
-      typeof aggregateInfo.projection[event.type] === 'function'
+      aggregateInstance.projection != null &&
+      typeof aggregateInstance.projection[event.type] === 'function'
     ) {
-      aggregateInfo.aggregateState = await aggregateInfo.projection[event.type](
-        aggregateInfo.aggregateState,
-        event
-      )
+      aggregateInstance.aggregateState = await aggregateInstance.projection[
+        event.type
+      ](aggregateInstance.aggregateState, event)
     }
 
-    aggregateInfo.cursor = await pool.eventstoreAdapter.getNextCursor(
-      aggregateInfo.cursor,
+    aggregateInstance.cursor = await runtime.eventstore.getNextCursor(
+      aggregateInstance.cursor,
       [event]
     )
 
-    aggregateInfo.minimalTimestamp = event.timestamp
+    aggregateInstance.minimalTimestamp = event.timestamp
 
     if (typeof processSnapshot === 'function') {
-      await processSnapshot(pool, aggregateInfo)
+      await processSnapshot(runtime, aggregateInstance)
     }
   } catch (error) {
     if (subSegment != null) {
@@ -165,17 +148,18 @@ const projectionEventHandler = async (
 }
 
 const takeSnapshot = async (
-  pool: CommandPool,
-  aggregateInfo: AggregateInfo
+  runtime: CommandRuntime,
+  aggregateInstance: AggregateInstance
 ): Promise<any> => {
-  const { aggregateName, performanceTracer, eventstoreAdapter } = pool
+  const { name: aggregateName } = aggregateInstance
+  const { monitoring, eventstore } = runtime
 
   const log = getLog(
-    `takeSnapshot:${aggregateName}:${aggregateInfo.aggregateId}`
+    `takeSnapshot:${aggregateName}:${aggregateInstance.aggregateId}`
   )
 
-  const segment = performanceTracer ? performanceTracer.getSegment() : null
-  const subSegment = segment ? segment.addNewSubsegment('applySnapshot') : null
+  const segment = monitoring?.performanceTracer?.getSegment()
+  const subSegment = segment?.addNewSubsegment('applySnapshot')
 
   try {
     if (subSegment != null) {
@@ -184,16 +168,18 @@ const takeSnapshot = async (
     }
 
     log.debug(`invoking event store snapshot taking operation`)
-    log.verbose(`version: ${aggregateInfo.aggregateVersion}`)
-    log.verbose(`minimalTimestamp: ${aggregateInfo.minimalTimestamp}`)
+    log.verbose(`version: ${aggregateInstance.aggregateVersion}`)
+    log.verbose(`minimalTimestamp: ${aggregateInstance.minimalTimestamp}`)
 
-    await eventstoreAdapter.saveSnapshot(
-      aggregateInfo.snapshotKey,
+    await eventstore.saveSnapshot(
+      aggregateInstance.snapshotKey,
       JSON.stringify({
-        state: aggregateInfo.serializeState(aggregateInfo.aggregateState),
-        version: aggregateInfo.aggregateVersion,
-        minimalTimestamp: aggregateInfo.minimalTimestamp,
-        cursor: aggregateInfo.cursor,
+        state: aggregateInstance.serializeState(
+          aggregateInstance.aggregateState
+        ),
+        version: aggregateInstance.aggregateVersion,
+        minimalTimestamp: aggregateInstance.minimalTimestamp,
+        cursor: aggregateInstance.cursor,
       })
     )
 
@@ -212,28 +198,25 @@ const takeSnapshot = async (
 }
 
 const getAggregateState = async (
-  pool: CommandPool,
-  meta: AggregateMeta,
+  runtime: CommandRuntime,
+  state: CommandExecutorState,
+  aggregate: AggregateMeta,
   aggregateId: string
 ): Promise<any> => {
+  const { monitoring, eventstore } = runtime
+  const { isDisposed } = state
   const {
-    aggregateName,
-    performanceTracer,
-    isDisposed,
-    eventstoreAdapter,
-  } = pool
-  const {
+    name: aggregateName,
     projection,
     serializeState,
     deserializeState,
     invariantHash = null,
-  } = meta
+  } = aggregate
   const log = getLog(`getAggregateState:${aggregateName}:${aggregateId}`)
 
-  const segment = performanceTracer ? performanceTracer.getSegment() : null
-  const subSegment = segment
-    ? segment.addNewSubsegment('getAggregateState')
-    : null
+  const performanceTracer = monitoring?.performanceTracer
+  const segment = performanceTracer?.getSegment()
+  const subSegment = segment?.addNewSubsegment('getAggregateState')
 
   try {
     if (subSegment != null) {
@@ -251,7 +234,8 @@ const getAggregateState = async (
       )
     }
 
-    const aggregateInfo = {
+    const aggregateInstance = {
+      name: aggregateName,
       aggregateState: null,
       aggregateVersion: 0,
       minimalTimestamp: 0,
@@ -295,7 +279,7 @@ const getAggregateState = async (
           }
 
           log.debug(`loading snapshot`)
-          const snapshot = await eventstoreAdapter.loadSnapshot(snapshotKey)
+          const snapshot = await eventstore.loadSnapshot(snapshotKey)
 
           if (snapshot != null && snapshot.constructor === String) {
             return JSON.parse(snapshot)
@@ -317,7 +301,7 @@ const getAggregateState = async (
         log.verbose(`snapshot.version: ${snapshot.version}`)
         log.verbose(`snapshot.minimalTimestamp: ${snapshot.minimalTimestamp}`)
 
-        Object.assign(aggregateInfo, {
+        Object.assign(aggregateInstance, {
           aggregateState: deserializeState(snapshot.state),
           aggregateVersion: snapshot.version,
           minimalTimestamp: snapshot.minimalTimestamp,
@@ -328,16 +312,28 @@ const getAggregateState = async (
       log.verbose(err.message)
     }
 
-    if (aggregateInfo.cursor == null && projection != null) {
+    if (aggregateInstance.cursor == null && projection != null) {
       log.debug(`building the aggregate state from scratch`)
-      aggregateInfo.aggregateState =
+      aggregateInstance.aggregateState =
         typeof projection.Init === 'function' ? await projection.Init() : null
     }
 
     const eventHandler =
       snapshotKey != null
-        ? projectionEventHandler.bind(null, pool, aggregateInfo, takeSnapshot)
-        : projectionEventHandler.bind(null, pool, aggregateInfo, null)
+        ? projectionEventHandler.bind(
+            null,
+            runtime,
+            state,
+            aggregateInstance,
+            takeSnapshot
+          )
+        : projectionEventHandler.bind(
+            null,
+            runtime,
+            state,
+            aggregateInstance,
+            null
+          )
 
     await (async (): Promise<any> => {
       const segment = performanceTracer ? performanceTracer.getSegment() : null
@@ -348,9 +344,9 @@ const getAggregateState = async (
           throw generateCommandError('Command handler is disposed')
         }
 
-        const { events } = await eventstoreAdapter.loadEvents({
+        const { events } = await eventstore.loadEvents({
           aggregateIds: [aggregateId],
-          cursor: aggregateInfo.cursor,
+          cursor: aggregateInstance.cursor,
           limit: Number.MAX_SAFE_INTEGER,
         })
 
@@ -378,7 +374,7 @@ const getAggregateState = async (
       }
     })()
 
-    return aggregateInfo
+    return aggregateInstance
   } catch (error) {
     log.error(error.message)
     if (subSegment != null) {
@@ -398,7 +394,7 @@ const isString = (val: any): val is string =>
   val != null && val.constructor === String
 
 const saveEvent = async (
-  onCommandExecuted: (event: any) => Promise<void>,
+  eventStore: Eventstore,
   event: Event
 ): Promise<any> => {
   if (!isString(event.type)) {
@@ -416,28 +412,31 @@ const saveEvent = async (
 
   event.aggregateId = String(event.aggregateId)
 
-  await onCommandExecuted(event)
+  await eventStore.saveEvent(event)
 
   return event
 }
 
 const executeCommand = async (
-  pool: CommandPool,
+  domain: CommandDomain,
+  runtime: CommandRuntime,
+  state: CommandExecutorState | undefined,
   command: Command
 ): Promise<CommandResult> => {
+  const actualState = state ?? { isDisposed: false }
   const { jwt: actualJwt, jwtToken: deprecatedJwt } = command
 
   const jwt = actualJwt || deprecatedJwt
 
-  const segment = pool.performanceTracer
-    ? pool.performanceTracer.getSegment()
-    : null
-  const subSegment = segment ? segment.addNewSubsegment('executeCommand') : null
+  const segment = runtime?.monitoring?.performanceTracer?.getSegment()
+  const subSegment = segment?.addNewSubsegment('executeCommand')
 
   try {
     await verifyCommand(command)
     const aggregateName = command.aggregateName
-    const aggregate = pool.aggregates.find(({ name }) => aggregateName === name)
+    const aggregate = domain.aggregates.find(
+      ({ name }) => aggregateName === name
+    )
 
     if (subSegment != null) {
       subSegment.addAnnotation('aggregateName', aggregateName)
@@ -445,13 +444,11 @@ const executeCommand = async (
       subSegment.addAnnotation('origin', 'resolve:executeCommand')
     }
 
-    pool.aggregateName = aggregateName
-
     if (aggregate == null) {
       const error = generateCommandError(
         `Aggregate "${aggregateName}" does not exist`
       )
-      await pool.onError(error, 'command')
+      await runtime.monitoring?.error(error, 'command')
       throw error
     }
 
@@ -460,26 +457,22 @@ const executeCommand = async (
       aggregateState,
       aggregateVersion,
       minimalTimestamp,
-    } = await getAggregateState(pool, aggregate, aggregateId)
+    } = await getAggregateState(runtime, actualState, aggregate, aggregateId)
 
     if (!aggregate.commands.hasOwnProperty(type)) {
       const error = generateCommandError(
         `Command type "${type}" does not exist`
       )
 
-      await pool.onError(error, 'command')
+      await runtime.monitoring?.error(error, 'command')
       throw error
     }
 
     const commandHandler: CommandHandler = async (
       ...args
     ): Promise<CommandResult> => {
-      const segment = pool.performanceTracer
-        ? pool.performanceTracer.getSegment()
-        : null
-      const subSegment = segment
-        ? segment.addNewSubsegment('processCommand')
-        : null
+      const segment = runtime.monitoring?.performanceTracer?.getSegment()
+      const subSegment = segment?.addNewSubsegment('processCommand')
       try {
         if (subSegment != null) {
           subSegment.addAnnotation('aggregateName', aggregateName)
@@ -492,7 +485,7 @@ const executeCommand = async (
         if (subSegment != null) {
           subSegment.addError(error)
         }
-        await pool.onError(error, 'command')
+        await runtime.monitoring?.error(error, 'command')
         throw error
       } finally {
         if (subSegment != null) {
@@ -501,7 +494,7 @@ const executeCommand = async (
       }
     }
 
-    const secretsManager = await pool.eventstoreAdapter.getSecretsManager()
+    const secretsManager = await runtime.eventstore.getSecretsManager()
 
     const encryption =
       typeof aggregate.encryption === 'function'
@@ -525,7 +518,7 @@ const executeCommand = async (
 
     if (!checkOptionShape(event.type, [String])) {
       const error = generateCommandError('Event "type" is required')
-      await pool.onError(error, 'command')
+      await runtime.monitoring?.error(error, 'command')
       throw error
     }
 
@@ -540,7 +533,7 @@ const executeCommand = async (
         'Event should not contain "aggregateId", "aggregateVersion", "timestamp" fields'
       )
 
-      await pool.onError(error, 'command')
+      await runtime.monitoring?.error(error, 'command')
       throw error
     }
 
@@ -556,18 +549,16 @@ const executeCommand = async (
     }
 
     await (async (): Promise<void> => {
-      const segment = pool.performanceTracer
-        ? pool.performanceTracer.getSegment()
-        : null
-      const subSegment = segment ? segment.addNewSubsegment('saveEvent') : null
+      const segment = runtime?.monitoring?.performanceTracer?.getSegment()
+      const subSegment = segment?.addNewSubsegment('saveEvent')
 
       try {
-        return await saveEvent(pool.onCommandExecuted, processedEvent)
+        return await saveEvent(runtime.eventstore, processedEvent)
       } catch (error) {
         if (subSegment != null) {
           subSegment.addError(error)
         }
-        await pool.onError(error, 'command')
+        await runtime.monitoring?.error(error, 'command')
         throw error
       } finally {
         if (subSegment != null) {
@@ -581,7 +572,7 @@ const executeCommand = async (
     if (subSegment != null) {
       subSegment.addError(error)
     }
-    await pool.onError(error, 'command')
+    await runtime.monitoring?.error(error, 'command')
     throw error
   } finally {
     if (subSegment != null) {
@@ -590,23 +581,24 @@ const executeCommand = async (
   }
 }
 
-const dispose = async (pool: CommandPool): Promise<void> => {
-  const segment = pool.performanceTracer
-    ? pool.performanceTracer.getSegment()
-    : null
-  const subSegment = segment ? segment.addNewSubsegment('dispose') : null
+const dispose = async (
+  state: CommandExecutorState,
+  monitoring?: Monitoring
+): Promise<void> => {
+  const segment = monitoring?.performanceTracer?.getSegment()
+  const subSegment = segment?.addNewSubsegment('dispose')
 
   try {
-    if (pool.isDisposed) {
+    if (state.isDisposed) {
       throw generateCommandError('Command handler is disposed')
     }
 
-    pool.isDisposed = true
+    state.isDisposed = true
   } catch (error) {
     if (subSegment != null) {
       subSegment.addError(error)
     }
-    await pool.onError(error, 'command')
+    monitoring && monitoring.error && (await monitoring.error(error, 'command'))
     throw error
   } finally {
     if (subSegment != null) {
@@ -615,35 +607,22 @@ const dispose = async (pool: CommandPool): Promise<void> => {
   }
 }
 
-const createCommandExecutor: CommandExecutorBuilder = ({
-  onCommandExecuted,
-  aggregates,
-  performanceTracer,
-  eventstoreAdapter,
-  onError = async () => void 0,
-}): CommandExecutor => {
-  const pool = {
-    onCommandExecuted,
-    aggregates,
-    isDisposed: false,
-    performanceTracer,
-    eventstoreAdapter,
-    onError: async (error: Error, part: string) => {
-      try {
-        await onError(error, part)
-      } catch (e) {}
-    },
-  }
-
-  const api = {
-    executeCommand: executeCommand.bind(null, pool as any),
-    dispose: dispose.bind(null, pool as any),
-  }
-
-  const commandExecutor = executeCommand.bind(null, pool as any)
-  Object.assign(commandExecutor, api)
-
-  return commandExecutor as CommandExecutor
+export const createCommandExecutor: CommandExecutorBuilder<CommandExecutor> = (
+  domain,
+  runtime,
+  state?
+): CommandExecutor => {
+  return executeCommand.bind(null, domain, runtime, state)
 }
 
-export default createCommandExecutor
+export const createDisposableCommandExecutor: CommandExecutorBuilder<DisposableCommandExecutor> = (
+  domain,
+  runtime
+): DisposableCommandExecutor => {
+  const state = { isDisposed: false }
+  const execute = createCommandExecutor(domain, runtime, state)
+  return {
+    execute,
+    dispose: dispose.bind(null, state, runtime.monitoring),
+  }
+}

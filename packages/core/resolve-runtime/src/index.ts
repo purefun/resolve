@@ -33,6 +33,7 @@ type Resolve = {
     events: Event[],
     context: EventTargetContext
   ) => Promise<any>
+  dispose: Function
 }
 
 const initRuntime = (context: ServerContext, resolve: Resolve): Promise<any> =>
