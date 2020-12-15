@@ -44,7 +44,7 @@ type CommandExecutorState = {
   isDisposed: boolean
 }
 
-type CommandExecutorBuilder<T> = (
+export type CommandExecutorBuilder<T> = (
   domain: CommandDomain,
   runtime: CommandRuntime,
   state?: CommandExecutorState

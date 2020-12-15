@@ -23,32 +23,33 @@ type BDDExecuteCommandState = {
 }
 
 type BDDExecuteCommandContext = {
-  createCommand: CommandExecutorBuilder
+  createCommand: CommandExecutorBuilder<CommandExecutor>
   promise: {
     [symbol]: BDDExecuteCommandState
   }
 }
 
-const makeDummyEventStoreAdapter = ({
+const makeDummyEventStore = ({
   secretsManager,
   events,
   aggregateId,
-}: BDDExecuteCommandState) => ({
-  getNextCursor: () => Promise.resolve(null),
-  saveSnapshot: () => Promise.resolve(),
-  getSecretsManager: () => Promise.resolve(secretsManager),
-  loadSnapshot: () => Promise.resolve(null),
-  loadEvents: () =>
-    Promise.resolve({
-      events: transformEvents(events, 'aggregate', { aggregateId }),
-    }),
-})
-
-const makeDummyPublisher = () => {
+}: BDDExecuteCommandState) => {
   const savedEvents: Event[] = []
-
-  return async (event: Event) => {
+  const saveEvent = (event: Event): Promise<void> => {
     savedEvents.push(event)
+    return Promise.resolve()
+  }
+
+  return {
+    saveEvent,
+    getNextCursor: () => Promise.resolve(null),
+    saveSnapshot: () => Promise.resolve(),
+    getSecretsManager: () => Promise.resolve(secretsManager),
+    loadSnapshot: () => Promise.resolve(null),
+    loadEvents: () =>
+      Promise.resolve({
+        events: transformEvents(events, 'aggregate', { aggregateId }),
+      }),
   }
 }
 
@@ -67,24 +68,24 @@ export const executeCommand = async (
   const { assertion, resolve, reject } = state
   let executor: CommandExecutor | null = null
   try {
-    const onCommandExecuted = makeDummyPublisher()
-
-    executor = createCommand({
-      eventstoreAdapter: makeDummyEventStoreAdapter(state),
-      onCommandExecuted,
-      performanceTracer: null,
-      aggregates: [
-        {
-          name: state.aggregate.name,
-          projection: state.aggregate.projection,
-          commands: state.aggregate.commands,
-          encryption: state.aggregate.encryption || null,
-          deserializeState: JSON.parse,
-          serializeState: JSON.stringify,
-          invariantHash: 'invariant-hash',
-        },
-      ],
-    })
+    executor = createCommand(
+      {
+        aggregates: [
+          {
+            name: state.aggregate.name,
+            projection: state.aggregate.projection,
+            commands: state.aggregate.commands,
+            encryption: state.aggregate.encryption || null,
+            deserializeState: JSON.parse,
+            serializeState: JSON.stringify,
+            invariantHash: 'invariant-hash',
+          },
+        ],
+      },
+      {
+        eventstore: makeDummyEventStore(state),
+      }
+    )
 
     const result = await executor({
       aggregateId: state.aggregateId,
@@ -108,9 +109,5 @@ export const executeCommand = async (
     return assertion(resolve, reject, event, null)
   } catch (error) {
     return assertion(resolve, reject, null, error)
-  } finally {
-    if (executor) {
-      await executor.dispose()
-    }
   }
 }
