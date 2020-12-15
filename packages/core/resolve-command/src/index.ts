@@ -7,6 +7,7 @@ import {
   AggregateMeta,
   Eventstore,
   Monitoring,
+  PerformanceSubsegment,
 } from 'resolve-core'
 import getLog from './get-log'
 
@@ -70,6 +71,27 @@ const generateCommandError = (message: string): Error => {
   return error
 }
 
+const getPerformanceTracerSubsegment = (
+  monitoring: Monitoring | undefined,
+  name: string
+): PerformanceSubsegment => {
+  const segment = monitoring?.performanceTracer?.getSegment()
+  const subSegment = segment?.addNewSubsegment(name)
+  return (
+    subSegment ?? {
+      addAnnotation: () => {
+        /*no-op*/
+      },
+      addError: () => {
+        /*no-op*/
+      },
+      close: () => {
+        /*no-op*/
+      },
+    }
+  )
+}
+
 const checkOptionShape = (option: any, types: any[]): boolean =>
   !(
     option == null ||
@@ -95,16 +117,16 @@ const projectionEventHandler = async (
   processSnapshot: SnapshotProcessor | null,
   event: Event
 ): Promise<any> => {
-  const segment = runtime.monitoring?.performanceTracer?.getSegment()
-  const subSegment = segment?.addNewSubsegment('applyEvent')
+  const subSegment = getPerformanceTracerSubsegment(
+    runtime.monitoring,
+    'applyEvent'
+  )
   try {
     const aggregateName = aggregateInstance.name
 
-    if (subSegment != null) {
-      subSegment.addAnnotation('aggregateName', aggregateName)
-      subSegment.addAnnotation('eventType', event.type)
-      subSegment.addAnnotation('origin', 'resolve:applyEvent')
-    }
+    subSegment.addAnnotation('aggregateName', aggregateName)
+    subSegment.addAnnotation('eventType', event.type)
+    subSegment.addAnnotation('origin', 'resolve:applyEvent')
 
     if (state.isDisposed) {
       throw generateCommandError('Command handler is disposed')
@@ -136,14 +158,10 @@ const projectionEventHandler = async (
       await processSnapshot(runtime, aggregateInstance)
     }
   } catch (error) {
-    if (subSegment != null) {
-      subSegment.addError(error)
-    }
+    subSegment.addError(error)
     throw error
   } finally {
-    if (subSegment != null) {
-      subSegment.close()
-    }
+    subSegment.close()
   }
 }
 
@@ -157,15 +175,11 @@ const takeSnapshot = async (
   const log = getLog(
     `takeSnapshot:${aggregateName}:${aggregateInstance.aggregateId}`
   )
-
-  const segment = monitoring?.performanceTracer?.getSegment()
-  const subSegment = segment?.addNewSubsegment('applySnapshot')
+  const subSegment = getPerformanceTracerSubsegment(monitoring, 'applySnapshot')
 
   try {
-    if (subSegment != null) {
-      subSegment.addAnnotation('aggregateName', aggregateName)
-      subSegment.addAnnotation('origin', 'resolve:applySnapshot')
-    }
+    subSegment.addAnnotation('aggregateName', aggregateName)
+    subSegment.addAnnotation('origin', 'resolve:applySnapshot')
 
     log.debug(`invoking event store snapshot taking operation`)
     log.verbose(`version: ${aggregateInstance.aggregateVersion}`)
@@ -186,14 +200,10 @@ const takeSnapshot = async (
     log.debug(`snapshot processed`)
   } catch (error) {
     log.error(error.message)
-    if (subSegment != null) {
-      subSegment.addError(error)
-    }
+    subSegment.addError(error)
     throw error
   } finally {
-    if (subSegment != null) {
-      subSegment.close()
-    }
+    subSegment.close()
   }
 }
 
@@ -214,15 +224,14 @@ const getAggregateState = async (
   } = aggregate
   const log = getLog(`getAggregateState:${aggregateName}:${aggregateId}`)
 
-  const performanceTracer = monitoring?.performanceTracer
-  const segment = performanceTracer?.getSegment()
-  const subSegment = segment?.addNewSubsegment('getAggregateState')
+  const subSegment = getPerformanceTracerSubsegment(
+    monitoring,
+    'getAggregateState'
+  )
 
   try {
-    if (subSegment != null) {
-      subSegment.addAnnotation('aggregateName', aggregateName)
-      subSegment.addAnnotation('origin', 'resolve:getAggregateState')
-    }
+    subSegment.addAnnotation('aggregateName', aggregateName)
+    subSegment.addAnnotation('origin', 'resolve:getAggregateState')
 
     const snapshotKey = checkOptionShape(projection, [Object])
       ? `AG;${invariantHash};${aggregateId}`
@@ -266,12 +275,10 @@ const getAggregateState = async (
       // }
 
       const snapshot = await (async (): Promise<any> => {
-        const segment = performanceTracer
-          ? performanceTracer.getSegment()
-          : null
-        const subSegment = segment
-          ? segment.addNewSubsegment('loadSnapshot')
-          : null
+        const subSegment = getPerformanceTracerSubsegment(
+          runtime.monitoring,
+          'loadSnapshot'
+        )
 
         try {
           if (isDisposed) {
@@ -286,14 +293,10 @@ const getAggregateState = async (
           }
           throw Error('invalid snapshot data')
         } catch (error) {
-          if (subSegment != null) {
-            subSegment.addError(error)
-          }
+          subSegment.addError(error)
           throw error
         } finally {
-          if (subSegment != null) {
-            subSegment.close()
-          }
+          subSegment.close()
         }
       })()
 
@@ -336,8 +339,10 @@ const getAggregateState = async (
           )
 
     await (async (): Promise<any> => {
-      const segment = performanceTracer ? performanceTracer.getSegment() : null
-      const subSegment = segment ? segment.addNewSubsegment('loadEvents') : null
+      const subSegment = getPerformanceTracerSubsegment(
+        runtime.monitoring,
+        'loadEvents'
+      )
 
       try {
         if (isDisposed) {
@@ -357,34 +362,24 @@ const getAggregateState = async (
           await eventHandler(event)
         }
 
-        if (subSegment != null) {
-          subSegment.addAnnotation('eventCount', events.length)
-          subSegment.addAnnotation('origin', 'resolve:loadEvents')
-        }
+        subSegment.addAnnotation('eventCount', events.length)
+        subSegment.addAnnotation('origin', 'resolve:loadEvents')
       } catch (error) {
         log.error(error.message)
-        if (subSegment != null) {
-          subSegment.addError(error)
-        }
+        subSegment.addError(error)
         throw error
       } finally {
-        if (subSegment != null) {
-          subSegment.close()
-        }
+        subSegment.close()
       }
     })()
 
     return aggregateInstance
   } catch (error) {
     log.error(error.message)
-    if (subSegment != null) {
-      subSegment.addError(error)
-    }
+    subSegment.addError(error)
     throw error
   } finally {
-    if (subSegment != null) {
-      subSegment.close()
-    }
+    subSegment.close()
   }
 }
 
@@ -428,8 +423,10 @@ const executeCommand = async (
 
   const jwt = actualJwt || deprecatedJwt
 
-  const segment = runtime?.monitoring?.performanceTracer?.getSegment()
-  const subSegment = segment?.addNewSubsegment('executeCommand')
+  const subSegment = getPerformanceTracerSubsegment(
+    runtime.monitoring,
+    'executeCommand'
+  )
 
   try {
     await verifyCommand(command)
@@ -438,11 +435,9 @@ const executeCommand = async (
       ({ name }) => aggregateName === name
     )
 
-    if (subSegment != null) {
-      subSegment.addAnnotation('aggregateName', aggregateName)
-      subSegment.addAnnotation('commandType', command.type)
-      subSegment.addAnnotation('origin', 'resolve:executeCommand')
-    }
+    subSegment.addAnnotation('aggregateName', aggregateName)
+    subSegment.addAnnotation('commandType', command.type)
+    subSegment.addAnnotation('origin', 'resolve:executeCommand')
 
     if (aggregate == null) {
       const error = generateCommandError(
@@ -471,26 +466,22 @@ const executeCommand = async (
     const commandHandler: CommandHandler = async (
       ...args
     ): Promise<CommandResult> => {
-      const segment = runtime.monitoring?.performanceTracer?.getSegment()
-      const subSegment = segment?.addNewSubsegment('processCommand')
+      const subSegment = getPerformanceTracerSubsegment(
+        runtime.monitoring,
+        'processCommand'
+      )
       try {
-        if (subSegment != null) {
-          subSegment.addAnnotation('aggregateName', aggregateName)
-          subSegment.addAnnotation('commandType', command.type)
-          subSegment.addAnnotation('origin', 'resolve:processCommand')
-        }
+        subSegment.addAnnotation('aggregateName', aggregateName)
+        subSegment.addAnnotation('commandType', command.type)
+        subSegment.addAnnotation('origin', 'resolve:processCommand')
 
         return await aggregate.commands[type](...args)
       } catch (error) {
-        if (subSegment != null) {
-          subSegment.addError(error)
-        }
+        subSegment.addError(error)
         await runtime.monitoring?.error(error, 'command')
         throw error
       } finally {
-        if (subSegment != null) {
-          subSegment.close()
-        }
+        subSegment.close()
       }
     }
 
@@ -549,35 +540,29 @@ const executeCommand = async (
     }
 
     await (async (): Promise<void> => {
-      const segment = runtime?.monitoring?.performanceTracer?.getSegment()
-      const subSegment = segment?.addNewSubsegment('saveEvent')
+      const subSegment = getPerformanceTracerSubsegment(
+        runtime.monitoring,
+        'saveEvent'
+      )
 
       try {
         return await saveEvent(runtime.eventstore, processedEvent)
       } catch (error) {
-        if (subSegment != null) {
-          subSegment.addError(error)
-        }
+        subSegment.addError(error)
         await runtime.monitoring?.error(error, 'command')
         throw error
       } finally {
-        if (subSegment != null) {
-          subSegment.close()
-        }
+        subSegment.close()
       }
     })()
 
     return processedEvent
   } catch (error) {
-    if (subSegment != null) {
-      subSegment.addError(error)
-    }
+    subSegment.addError(error)
     await runtime.monitoring?.error(error, 'command')
     throw error
   } finally {
-    if (subSegment != null) {
-      subSegment.close()
-    }
+    subSegment.close()
   }
 }
 
@@ -585,8 +570,7 @@ const dispose = async (
   state: CommandExecutorState,
   monitoring?: Monitoring
 ): Promise<void> => {
-  const segment = monitoring?.performanceTracer?.getSegment()
-  const subSegment = segment?.addNewSubsegment('dispose')
+  const subSegment = getPerformanceTracerSubsegment(monitoring, 'dispose')
 
   try {
     if (state.isDisposed) {
@@ -595,15 +579,11 @@ const dispose = async (
 
     state.isDisposed = true
   } catch (error) {
-    if (subSegment != null) {
-      subSegment.addError(error)
-    }
+    subSegment.addError(error)
     monitoring && monitoring.error && (await monitoring.error(error, 'command'))
     throw error
   } finally {
-    if (subSegment != null) {
-      subSegment.close()
-    }
+    subSegment.close()
   }
 }
 

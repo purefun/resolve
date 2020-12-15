@@ -21,5 +21,18 @@ export type SecretsManager = {
 
 export type Monitoring = {
   error: (error: Error, part: string) => Promise<void>
-  performanceTracer?: any
+  performanceTracer?: PerformanceTracer
+}
+
+export type PerformanceSubsegment = {
+  addAnnotation: (name: string, data: any) => void
+  addError: (error: Error) => void
+  close: () => void
+}
+export type PerformanceSegment = {
+  addNewSubsegment: (name: string) => PerformanceSubsegment
+}
+
+export type PerformanceTracer = {
+  getSegment: () => PerformanceSegment
 }
