@@ -58,6 +58,10 @@ export type ReadModelMeta = {
   encryption: Function
 }
 
+export type SagaMeta = ReadModelMeta & {
+  setSagaProperties: (inlineLedger: { Properties: any }) => Promise<void>
+}
+
 export type ReadModelPool = {
   performanceTracer: any
   eventstoreAdapter: any

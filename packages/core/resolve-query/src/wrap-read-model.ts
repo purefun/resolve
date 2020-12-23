@@ -1,7 +1,12 @@
 import { EOL } from 'os'
 // TODO: core cannot reference "top-level" packages, move these to resolve-core
 import { OMIT_BATCH, STOP_BATCH } from 'resolve-readmodel-base'
-import { Eventstore, getPerformanceTracerSubsegment, SecretsManager, ReadModelConnector } from 'resolve-core'
+import {
+  Eventstore,
+  getPerformanceTracerSubsegment,
+  SecretsManager,
+  ReadModelConnector,
+} from 'resolve-core'
 
 import getLog from './get-log'
 import {
@@ -13,11 +18,16 @@ import {
   ReadModelMeta,
   QueryExecutor,
   QueryExecutorState,
+  SagaMeta,
 } from './types'
 import parseReadOptions from './parse-read-options'
 
+const isSagaMeta = (meta: ReadModelMeta | SagaMeta): meta is SagaMeta => {
+  return typeof (meta as SagaMeta).setSagaProperties === 'function'
+}
+
 const wrapConnection = async (
-  readModelName: string
+  readModelName: string,
   readModelConnector: ReadModelConnector,
   eventstore: Eventstore,
   state: QueryExecutorState,
@@ -155,6 +165,7 @@ const serializeError = (
       }
     : null
 
+//TODO: Code is duplicated in inline ledger
 const sendEvents = async (
   readModel: ReadModelMeta,
   connector: ReadModelConnector,
@@ -488,7 +499,7 @@ const read = async (
             ),
           }
         } catch (error) {
-            subSegment.addError(error)
+          subSegment.addError(error)
           try {
             await monitoring?.error(error, 'read-model-resolver')
           } catch (e) {}
@@ -528,7 +539,6 @@ const doOperation = async (
   eventstore: Eventstore,
   parameters: any
 ): Promise<any> => {
-
   if (state.isDisposed) {
     throw new Error(`read-model "${readModelName}" is disposed`)
   }
@@ -545,7 +555,7 @@ const doOperation = async (
 
       const args =
         prepareArguments != null
-          ? prepareArguments(pool, ...originalArgs)
+          ? prepareArguments(pool, ...originalArgs) //TODO: remove pool
           : originalArgs
 
       result = await connector[operationName](...args)
@@ -576,20 +586,12 @@ const next = async (
   await pool.invokeEventBusAsync(eventListener, 'build')
 }
 
-const provideLedger = async (
-  pool: any,
-  readModelName: string,
+const readSagaProperties = async (
+  readModel: ReadModelMeta | SagaMeta,
   inlineLedger: any
 ) => {
-  try {
-    if (typeof pool.readModel.setProperties === 'function') {
-      await pool.readModel.provideLedger(inlineLedger)
-    }
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `Provide inline ledger for event listener ${readModelName} failed: ${error}`
-    )
+  if (isSagaMeta(readModel)) {
+    await readModel.setSagaProperties(inlineLedger)
   }
 }
 
@@ -623,7 +625,7 @@ const build = doOperation.bind(
     pool.readModel.projection,
     next.bind(null, pool, readModelName),
     pool.getVacantTimeInMillis,
-    provideLedger.bind(null, pool, readModelName),
+    readSagaProperties.bind(null, pool.readModel),
     getEncryption.bind(null, pool),
   ]
 )
@@ -773,16 +775,19 @@ const status = doOperation.bind(
   ) => [connection, readModelName]
 )
 
-const dispose = async (pool: ReadModelPool): Promise<void> => {
-  const readModelName = pool.readModel.name
-  if (pool.isDisposed) {
+const dispose = async (
+  readModelName: string,
+  connector: ReadModelConnector,
+  state: QueryExecutorState
+): Promise<void> => {
+  if (state.isDisposed) {
     throw new Error(`read-model "${readModelName}" is disposed`)
   }
-  pool.isDisposed = true
+  state.isDisposed = true
 
   const promises = []
-  for (const connection of pool.connections) {
-    promises.push(pool.connector.disconnect(connection, readModelName))
+  for (const connection of state.connections) {
+    promises.push(connector.disconnect(connection, readModelName))
   }
   await Promise.all(promises)
 }
@@ -800,8 +805,8 @@ const wrapReadModel = (readModel: ReadModelMeta, runtime: QueryRuntime) => {
 
   const state = {
     connections: new Set(),
-    isDisposed: false
-  };
+    isDisposed: false,
+  }
 
   const pool: ReadModelPool = {
     invokeEventBusAsync,
@@ -819,11 +824,12 @@ const wrapReadModel = (readModel: ReadModelMeta, runtime: QueryRuntime) => {
   const api = {
     read: read.bind(null, readModel, connector, runtime, state),
     sendEvents: sendEvents.bind(null, readModel, connector, runtime, state),
-    serializeState: serializeState.bind(null, pool),
-    drop: drop.bind(null, pool),
-    dispose: dispose.bind(null, pool),
+    dispose: dispose.bind(null, readModel.name, connector, state),
+    serializeState: serializeState.bind(null, pool), //TODO: why it is here and where deserialilze is?
+    drop: drop.bind(null, pool), //TODO: discuss customer interface
   }
 
+  //TODO: push down to runtime with runtime callback
   log.debug(`detecting connector features`)
 
   const detectedFeatures = detectConnectorFeatures(connector)

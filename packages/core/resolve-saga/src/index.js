@@ -130,8 +130,15 @@ const createSaga = ({
 
   const sagasAsReadModels = [...regularSagas, ...schedulerSagas].map(
     (saga) => ({
-      provideLedger: async (inlineLedger) => {
-        eventProperties = inlineLedger.Properties
+      setSagaProperties: async (inlineLedger) => {
+        try {
+          eventProperties = inlineLedger.Properties
+        } catch (error) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `Provide inline ledger for event listener ${saga.name} failed: ${error}`
+          )
+        }
       },
       ...saga,
     })
