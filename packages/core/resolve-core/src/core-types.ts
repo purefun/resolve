@@ -130,20 +130,20 @@ export type ReadModelEncryptionFactory = (
 
 // TODO: move types from resolve-client here?
 
-type ReadModelQuery = {
+export type ReadModelQuery = {
   modelName: string
   resolverName: string
   resolverArgs: Serializable
   jwt?: string
   jwtToken?: string
 }
-type ReadModelQueryResult = Serializable
-type ViewModelQuery = {
+export type ReadModelQueryResult = Serializable
+export type ViewModelQuery = {
   modelName: string
   aggregateIds: Array<string> | '*'
   aggregateArgs: Serializable
 }
-type ViewModelQueryResult = Serializable
+export type ViewModelQueryResult = Serializable
 type SagaSideEffects = {
   executeCommand: (command: Command) => Promise<CommandResult>
   executeQuery: (

@@ -1,4 +1,12 @@
-import { IS_BUILT_IN } from 'resolve-core'
+import {
+  Eventstore,
+  IS_BUILT_IN,
+  Monitoring,
+  ReadModelQuery,
+  ReadModelQueryResult,
+  ViewModelQuery,
+  ViewModelQueryResult,
+} from 'resolve-core'
 
 export type CreateQueryOptions = {
   invokeEventBusAsync: Function
@@ -86,3 +94,39 @@ export type BuildViewModelQuery = {
   aggregateIds: Array<string> | null
   aggregateArgs: any
 }
+
+export type QueryExecutor = (
+  query: ReadModelQuery | ViewModelQuery
+) => Promise<ReadModelQueryResult | ViewModelQueryResult>
+
+export type DisposableQueryExecutor = {
+  execute: (
+    query: ReadModelQuery | ViewModelQuery
+  ) => Promise<ReadModelQueryResult | ViewModelQueryResult>
+  dispose: () => Promise<void>
+}
+
+export type QueryDomain = {
+  readModels: any[]
+  viewModels: any[]
+}
+
+export type QueryRuntime = {
+  invokeEventBusAsync: Function
+  readModelConnectors: any
+  eventstore: Eventstore
+  getVacantTimeInMillis: any
+  performAcknowledge: any
+  monitoring?: Monitoring
+}
+
+export type QueryExecutorState = {
+  connections: Set<any>
+  isDisposed: boolean
+}
+
+export type QueryExecutorBuilder<T> = (
+  domain: QueryDomain,
+  runtime: QueryRuntime,
+  state?: QueryExecutorState
+) => T

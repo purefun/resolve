@@ -1,34 +1,45 @@
 import { EOL } from 'os'
 // TODO: core cannot reference "top-level" packages, move these to resolve-core
 import { OMIT_BATCH, STOP_BATCH } from 'resolve-readmodel-base'
-import { SecretsManager } from 'resolve-core'
+import { Eventstore, getPerformanceTracerSubsegment, SecretsManager, ReadModelConnector } from 'resolve-core'
 
 import getLog from './get-log'
-import { WrapReadModelOptions, SerializedError, ReadModelPool } from './types'
+import {
+  WrapReadModelOptions,
+  SerializedError,
+  ReadModelPool,
+  QueryDomain,
+  QueryRuntime,
+  ReadModelMeta,
+  QueryExecutor,
+  QueryExecutorState,
+} from './types'
 import parseReadOptions from './parse-read-options'
 
 const wrapConnection = async (
-  pool: ReadModelPool,
+  readModelName: string
+  readModelConnector: ReadModelConnector,
+  eventstore: Eventstore,
+  state: QueryExecutorState,
   callback: Function
 ): Promise<any> => {
-  const readModelName = pool.readModel.name
   const log = getLog(`wrapConnection:${readModelName}`)
   log.debug(`establishing connection`)
-  const connection = await pool.connector.connect(readModelName)
-  pool.connections.add(connection)
+  const connection = await readModelConnector.connect(readModelName)
+  state.connections.add(connection)
 
   log.debug(`retrieving event store secrets manager`)
   const secretsManager =
-    typeof pool.eventstoreAdapter.getSecretsManager === 'function'
-      ? await pool.eventstoreAdapter.getSecretsManager()
+    typeof eventstore.getSecretsManager === 'function'
+      ? await eventstore.getSecretsManager()
       : null
 
   try {
     return await callback(connection, secretsManager)
   } finally {
     log.debug(`disconnecting`)
-    await pool.connector.disconnect(connection, readModelName)
-    pool.connections.delete(connection)
+    await readModelConnector.disconnect(connection, readModelName)
+    state.connections.delete(connection)
   }
 }
 
@@ -145,7 +156,10 @@ const serializeError = (
     : null
 
 const sendEvents = async (
-  pool: ReadModelPool,
+  readModel: ReadModelMeta,
+  connector: ReadModelConnector,
+  runtime: QueryRuntime,
+  state: QueryExecutorState,
   {
     batchId,
     xaTransactionId,
@@ -158,8 +172,7 @@ const sendEvents = async (
     batchId: any
   }
 ): Promise<any> => {
-  const { performAcknowledge, getVacantTimeInMillis } = pool
-  const readModelName = pool.readModel.name
+  const readModelName = readModel.name
   let result = null
 
   const log = getLog(`sendEvents:${readModelName}`)
@@ -169,11 +182,11 @@ const sendEvents = async (
   let lastError: any = null
 
   try {
-    if (pool.isDisposed) {
+    if (state.isDisposed) {
       throw new Error(`read-model "${readModelName}" is disposed`)
     }
 
-    const projection = pool.readModel.projection
+    const projection = readModel.projection
     if (projection == null) {
       throw new Error(
         `updating by events is prohibited when "${readModelName}" projection is not specified`
@@ -190,7 +203,7 @@ const sendEvents = async (
       )
 
       try {
-        if (pool.isDisposed) {
+        if (state.isDisposed) {
           throw new Error(
             `read-model "${readModelName}" updating had been interrupted`
           )
@@ -199,8 +212,8 @@ const sendEvents = async (
           if (typeof projection[event.type] === 'function') {
             log.debug(`building read-model encryption`)
             const encryption =
-              typeof pool.readModel.encryption === 'function'
-                ? await pool.readModel.encryption(event, {
+              typeof readModel.encryption === 'function'
+                ? await readModel.encryption(event, {
                     secretsManager,
                   })
                 : null
@@ -220,7 +233,7 @@ const sendEvents = async (
         lastFailedEvent = event
 
         try {
-          await pool.onError(error, 'read-model-projection')
+          await runtime.monitoring?.error(error, 'read-model-projection')
         } catch (e) {
           log.verbose('onError function call failed')
           log.verbose(e.stack)
@@ -231,7 +244,10 @@ const sendEvents = async (
     }
 
     await wrapConnection(
-      pool,
+      readModelName,
+      connector,
+      runtime.eventstore,
+      state,
       async (connection: any, secretsManager: SecretsManager): Promise<any> => {
         const log = getLog(`readModel:wrapConnection`)
         log.debug(
@@ -283,16 +299,16 @@ const sendEvents = async (
             onBeforeBatch,
             onSuccessBatch,
             onFailBatch,
-          } = detectBatchWrappers(pool.connector)
+          } = detectBatchWrappers(connector)
 
           await onBeforeBatch(connection, readModelName, xaTransactionId)
           for (const event of events) {
-            const remainingTime = getVacantTimeInMillis()
+            const remainingTime = runtime.getVacantTimeInMillis()
             const {
               onBeforeEvent,
               onSuccessEvent,
               onFailEvent,
-            } = detectEventWrappers(pool.connector)
+            } = detectEventWrappers(connector)
 
             log.debug(
               `remaining read-model "${readModelName}" feeding time is ${remainingTime} ms`
@@ -400,64 +416,65 @@ const sendEvents = async (
     error: serializeError(lastError),
   }
 
-  await performAcknowledge({
+  //TODO: rename to a more generic name (ie. onEventBatchApplied)
+  await runtime.performAcknowledge({
     result,
     batchId,
   })
 }
 
 const read = async (
-  pool: ReadModelPool,
+  readModel: ReadModelMeta,
+  connector: ReadModelConnector,
+  runtime: QueryRuntime,
+  state: QueryExecutorState,
   { jwt, ...params }: any
 ): Promise<any> => {
-  const { eventstoreAdapter, isDisposed, readModel, performanceTracer } = pool
   const readModelName = readModel.name
-
+  const { monitoring } = runtime
   const [resolverName, resolverArgs] = parseReadOptions(params)
 
-  if (isDisposed) {
+  if (state.isDisposed) {
     throw new Error(`Read model "${readModelName}" is disposed`)
   }
 
-  const segment = performanceTracer ? performanceTracer.getSegment() : null
-  const subSegment = segment ? segment.addNewSubsegment('read') : null
+  const subSegment = getPerformanceTracerSubsegment(monitoring, 'read')
 
-  if (subSegment != null) {
-    subSegment.addAnnotation('readModelName', readModelName)
-    subSegment.addAnnotation('resolverName', resolverName)
-    subSegment.addAnnotation('origin', 'resolve:query:read')
-  }
+  subSegment.addAnnotation('readModelName', readModelName)
+  subSegment.addAnnotation('resolverName', resolverName)
+  subSegment.addAnnotation('origin', 'resolve:query:read')
 
   try {
-    if (isDisposed) {
+    if (state.isDisposed) {
       throw new Error(`Read model "${readModelName}" is disposed`)
     }
-    if (typeof pool.readModel.resolvers[resolverName] !== 'function') {
+    if (typeof readModel.resolvers[resolverName] !== 'function') {
       const error = new Error(
         `Resolver "${resolverName}" does not exist`
       ) as any
       error.code = 422
 
       try {
-        await pool.onError(error, 'read-model-resolver')
+        await monitoring?.error(error, 'read-model-resolver')
       } catch (e) {}
 
       throw error
     }
 
     return await wrapConnection(
-      pool,
-      async (connection: any): Promise<any> => {
-        const segment = performanceTracer
-          ? performanceTracer.getSegment()
-          : null
-        const subSegment = segment ? segment.addNewSubsegment('resolver') : null
+      readModelName,
+      connector,
+      runtime.eventstore,
+      state,
+      async (connection: any, secretsManager: SecretsManager): Promise<any> => {
+        const subSegment = getPerformanceTracerSubsegment(
+          monitoring,
+          'resolver'
+        )
 
-        if (subSegment != null) {
-          subSegment.addAnnotation('readModelName', readModelName)
-          subSegment.addAnnotation('resolverName', resolverName)
-          subSegment.addAnnotation('origin', 'resolve:query:resolver')
-        }
+        subSegment.addAnnotation('readModelName', readModelName)
+        subSegment.addAnnotation('resolverName', resolverName)
+        subSegment.addAnnotation('origin', 'resolve:query:resolver')
 
         try {
           return {
@@ -465,44 +482,33 @@ const read = async (
               connection,
               resolverArgs,
               {
-                secretsManager:
-                  typeof eventstoreAdapter.getSecretsManager === 'function'
-                    ? await eventstoreAdapter.getSecretsManager()
-                    : null,
+                secretsManager,
                 jwt,
               }
             ),
           }
         } catch (error) {
-          if (subSegment != null) {
             subSegment.addError(error)
-          }
           try {
-            await pool.onError(error, 'read-model-resolver')
+            await monitoring?.error(error, 'read-model-resolver')
           } catch (e) {}
 
           throw error
         } finally {
-          if (subSegment != null) {
-            subSegment.close()
-          }
+          subSegment.close()
         }
       }
     )
   } catch (error) {
-    if (subSegment != null) {
-      subSegment.addError(error)
-    }
+    subSegment.addError(error)
 
     try {
-      await pool.onError(error, 'read-model-resolver')
+      await monitoring?.error(error, 'read-model-resolver')
     } catch (e) {}
 
     throw error
   } finally {
-    if (subSegment != null) {
-      subSegment.close()
-    }
+    subSegment.close()
   }
 }
 
@@ -516,19 +522,24 @@ const serializeState = async (
 const doOperation = async (
   operationName: string,
   prepareArguments: Function | null,
-  pool: ReadModelPool,
+  readModelName: string,
+  connector: ReadModelConnector,
+  state: QueryExecutorState,
+  eventstore: Eventstore,
   parameters: any
 ): Promise<any> => {
-  const readModelName = pool.readModel.name
 
-  if (pool.isDisposed) {
+  if (state.isDisposed) {
     throw new Error(`read-model "${readModelName}" is disposed`)
   }
 
   let result = null
 
   await wrapConnection(
-    pool,
+    readModelName,
+    connector,
+    eventstore,
+    state,
     async (connection: any): Promise<any> => {
       const originalArgs = [connection, readModelName, parameters]
 
@@ -537,7 +548,7 @@ const doOperation = async (
           ? prepareArguments(pool, ...originalArgs)
           : originalArgs
 
-      result = await pool.connector[operationName](...args)
+      result = await connector[operationName](...args)
     }
   )
 
@@ -776,25 +787,21 @@ const dispose = async (pool: ReadModelPool): Promise<void> => {
   await Promise.all(promises)
 }
 
-const wrapReadModel = ({
-  readModel,
-  readModelConnectors,
-  eventstoreAdapter,
-  invokeEventBusAsync,
-  performanceTracer,
-  getVacantTimeInMillis,
-  performAcknowledge,
-  onError = async () => void 0,
-}: WrapReadModelOptions) => {
+const wrapReadModel = (readModel: ReadModelMeta, runtime: QueryRuntime) => {
   const log = getLog(`readModel:wrapReadModel:${readModel.name}`)
 
   log.debug(`wrapping read-model`)
-  const connector = readModelConnectors[readModel.connectorName]
+  const connector = runtime.readModelConnectors[readModel.connectorName]
   if (connector == null) {
     throw new Error(
       `connector "${readModel.connectorName}" for read-model "${readModel.name}" does not exist`
     )
   }
+
+  const state = {
+    connections: new Set(),
+    isDisposed: false
+  };
 
   const pool: ReadModelPool = {
     invokeEventBusAsync,
@@ -810,8 +817,8 @@ const wrapReadModel = ({
   }
 
   const api = {
-    read: read.bind(null, pool),
-    sendEvents: sendEvents.bind(null, pool),
+    read: read.bind(null, readModel, connector, runtime, state),
+    sendEvents: sendEvents.bind(null, readModel, connector, runtime, state),
     serializeState: serializeState.bind(null, pool),
     drop: drop.bind(null, pool),
     dispose: dispose.bind(null, pool),

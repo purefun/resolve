@@ -7,7 +7,7 @@ import {
   AggregateMeta,
   Eventstore,
   Monitoring,
-  PerformanceSubsegment,
+  getPerformanceTracerSubsegment,
 } from 'resolve-core'
 import getLog from './get-log'
 
@@ -69,27 +69,6 @@ const generateCommandError = (message: string): Error => {
     stack: { value: error.stack, enumerable: true },
   })
   return error
-}
-
-const getPerformanceTracerSubsegment = (
-  monitoring: Monitoring | undefined,
-  name: string
-): PerformanceSubsegment => {
-  const segment = monitoring?.performanceTracer?.getSegment()
-  const subSegment = segment?.addNewSubsegment(name)
-  return (
-    subSegment ?? {
-      addAnnotation: () => {
-        /*no-op*/
-      },
-      addError: () => {
-        /*no-op*/
-      },
-      close: () => {
-        /*no-op*/
-      },
-    }
-  )
 }
 
 const checkOptionShape = (option: any, types: any[]): boolean =>

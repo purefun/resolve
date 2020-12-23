@@ -7,7 +7,11 @@ import wrapReadModel, {
 } from './wrap-read-model'
 import wrapViewModel from './wrap-view-model'
 
-import { CreateQueryOptions } from './types'
+import {
+  CreateQueryOptions,
+  QueryExecutor,
+  QueryExecutorBuilder,
+} from './types'
 
 const dispose = async (models: any): Promise<any> => {
   for (const modelName of Object.keys(models)) {
@@ -52,25 +56,29 @@ const interopApi = async (models: any, key: string, ...args: Array<any>) => {
   return result
 }
 
-const createQuery = (params: CreateQueryOptions): any => {
+const createQuery: QueryExecutorBuilder<QueryExecutor> = (
+  domain,
+  runtime,
+  state
+): QueryExecutor => {
   const models: {
     [key: string]: any
   } = {}
 
-  const { readModels, viewModels, ...imports } = params
+  const { readModels, viewModels } = domain
 
   for (const readModel of readModels) {
     if (models[readModel.name] != null) {
       throw new Error(`Duplicate name for read model: "${readModel.name}"`)
     }
-    models[readModel.name] = wrapReadModel({ readModel, ...imports })
+    models[readModel.name] = wrapReadModel({ readModel, ...runtime })
   }
 
   for (const viewModel of viewModels) {
     if (models[viewModel.name] != null) {
       throw new Error(`Duplicate name for view model: "${viewModel.name}"`)
     }
-    models[viewModel.name] = wrapViewModel({ viewModel, ...imports })
+    models[viewModel.name] = wrapViewModel({ viewModel, ...runtime })
   }
 
   const read = interopApi.bind(null, models, 'read') as any
@@ -92,11 +100,11 @@ const createQuery = (params: CreateQueryOptions): any => {
   return api
 }
 
-export {
-  FULL_XA_CONNECTOR,
-  FULL_REGULAR_CONNECTOR,
-  EMPTY_CONNECTOR,
-  INLINE_LEDGER_CONNECTOR,
-  detectConnectorFeatures,
-}
+// export {
+//   FULL_XA_CONNECTOR,
+//   FULL_REGULAR_CONNECTOR,
+//   EMPTY_CONNECTOR,
+//   INLINE_LEDGER_CONNECTOR,
+//   detectConnectorFeatures,
+// }
 export default createQuery

@@ -36,3 +36,8 @@ export type PerformanceSegment = {
 export type PerformanceTracer = {
   getSegment: () => PerformanceSegment
 }
+
+export type ReadModelConnector = {
+  connect: (readModelName: string) => Promise<any>
+  disconnect: (readModelName: string, connection: any) => Promise<void>
+}
